@@ -1,145 +1,99 @@
-name: CI / CD (no Docker)
+name: Deploy NGO System to EC2
 
 on:
   push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+    branches:
+      - main
+  workflow_dispatch: {}
 
-env:
-  FRONTEND_DIR: Frontend/Ngo_system_frontend
-  BACKEND_DIR: Backend
-  NODE_VERSION: '18'
+concurrency:
+  group: main-deploy
+  cancel-in-progress: true
 
 jobs:
-  build-frontend:
-    name: Build Frontend
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Cache frontend node modules
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.FRONTEND_DIR }}/node_modules
-          key: frontend-${{ runner.os }}-v1-${{ hashFiles('Frontend/Ngo_system_frontend/package-lock.json') }}
-          restore-keys: |
-            frontend-${{ runner.os }}-v1-
-
-      - name: Install frontend dependencies
-        working-directory: ${{ env.FRONTEND_DIR }}
-        run: npm ci
-
-      - name: Lint frontend (optional)
-        working-directory: ${{ env.FRONTEND_DIR }}
-        run: npm run lint || true
-
-      - name: Build frontend
-        working-directory: ${{ env.FRONTEND_DIR }}
-        run: npm run build
-
-      - name: Upload frontend build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: frontend-dist
-          path: ${{ env.FRONTEND_DIR }}/dist
-
-  build-backend:
-    name: Build & Test Backend
-    runs-on: ubuntu-latest
-    needs: build-frontend
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Cache backend node modules
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.BACKEND_DIR }}/node_modules
-          key: backend-${{ runner.os }}-v1-${{ hashFiles('Backend/package-lock.json') }}
-          restore-keys: |
-            backend-${{ runner.os }}-v1-
-
-      - name: Install backend dependencies
-        working-directory: ${{ env.BACKEND_DIR }}
-        run: npm ci
-
-      - name: Lint backend (optional)
-        working-directory: ${{ env.BACKEND_DIR }}
-        run: npm run lint || true
-
-      - name: Run backend tests (if any)
-        working-directory: ${{ env.BACKEND_DIR }}
-        run: npm test || echo "No tests or tests failed"
-
-      - name: Upload backend artifact (optional)
-        uses: actions/upload-artifact@v4
-        with:
-          name: backend
-          path: ${{ env.BACKEND_DIR }}
-
   deploy:
-    name: Deploy to server (SSH)
     runs-on: ubuntu-latest
-    needs: [build-frontend, build-backend]
-    if: ${{ secrets.DEPLOY_HOST && secrets.DEPLOY_USER && secrets.DEPLOY_KEY }}
+    permissions:
+      contents: read
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v0.1.9
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_KEY }}
-          port: ${{ secrets.DEPLOY_PORT || '22' }}
+          node-version: '18'
+
+      - name: Ensure project folders on EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            mkdir -p /home/${{ secrets.EC2_USER }}/ngos/Backend
+            mkdir -p /home/${{ secrets.EC2_USER }}/ngos/Frontend/Ngo_system_frontend
+            sudo chown -R $USER:$USER /home/${{ secrets.EC2_USER }}/ngos
+            sudo chmod -R u+rwX /home/${{ secrets.EC2_USER }}/ngos
+
+      - name: Upload project to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "Backend/,Frontend/"
+          target: "/home/${{ secrets.EC2_USER }}/ngos"
+          strip_components: 0
+          overwrite: true
+
+      - name: Deploy application on EC2
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: MONGO_URI,JWT_SECRET
+          script_stop: true
           script: |
             set -e
-            # Remote deploy path (from secret) or default
-            REMOTE_ROOT="${{ secrets.DEPLOY_PATH || '/home/' + (secrets.DEPLOY_USER || 'ubuntu') + '/ngos' }}"
-            cd "$REMOTE_ROOT" || git clone https://github.com/${{ github.repository }} "$REMOTE_ROOT" && cd "$REMOTE_ROOT"
-            git fetch --all
-            git reset --hard origin/main || true
+            cd /home/${{ secrets.EC2_USER }}/ngos
 
-            # Backend: install and restart
-            cd "${{ env.BACKEND_DIR }}"
-            npm ci --production || true
-            if command -v pm2 >/dev/null 2>&1; then
-              pm2 restart ngo-backend || pm2 start npm --name ngo-backend -- start
-            else
-              pkill -f "node index.js" || true
-              nohup npm start > backend.log 2>&1 & disown || true
+            # Install PM2 globally if not present
+            if ! command -v pm2 >/dev/null 2>&1; then
+              echo "🔹 Installing PM2..."
+              sudo npm install -g pm2
             fi
 
-            # Frontend: build and optional publish to webroot
-            cd "../${{ env.FRONTEND_DIR }}"
-            npm ci --production || true
-            npm run build || true
+            # Deploy Backend
+            echo "🔹 Deploying Backend..."
+            cd Backend
+            npm ci --production
+            
+            # Update environment variables
+            echo "MONGO_URI=$MONGO_URI" > .env
+            echo "JWT_SECRET=$JWT_SECRET" >> .env
+            
+            # Restart backend with PM2
+            pm2 stop ngo-backend || true
+            pm2 delete ngo-backend || true
+            pm2 start index.js --name ngo-backend
+            pm2 save
 
-            if [ -n "${{ secrets.WEBROOT_PATH }}" ]; then
-              rm -rf "${{ secrets.WEBROOT_PATH }}"/* || true
-              cp -r dist/* "${{ secrets.WEBROOT_PATH }}/" || true
-            fi
+            # Deploy Frontend
+            echo "🔹 Deploying Frontend..."
+            cd ../Frontend/Ngo_system_frontend
+            npm ci
+            npm run build
 
-            echo "Deployment finished on $(hostname) at $(date)."
+            # If using nginx, copy build files (uncomment and adjust path if needed)
+            # sudo cp -r dist/* /var/www/html/
+            
+            echo "✅ Deployment complete!"
 
-  notify:
-    name: Notify on failure
-    runs-on: ubuntu-latest
-    needs: [build-frontend, build-backend]
-    if: failure()
-    steps:
-      - name: Print failure message
-        run: echo "CI pipeline failed for ${{ github.ref }} (commit: ${{ github.sha }})"
+            # Show running processes
+            pm2 list
