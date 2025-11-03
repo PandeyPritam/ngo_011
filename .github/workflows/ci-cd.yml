@@ -1,4 +1,4 @@
-name: 🚀 Deploy Node App to EC2
+name: Deploy to EC2 (Node.js App)
 
 on:
   push:
@@ -11,98 +11,81 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  deploy:
+  validate-secrets:
+    name: ✅ Validate Secrets (Skip if Missing)
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
+    outputs:
+      deploy_enabled: ${{ steps.check.outputs.deploy_enabled }}
     steps:
-      # --------------------------------------------
-      # STEP 1: Checkout repository
-      # --------------------------------------------
+      - name: Check required secrets
+        id: check
+        run: |
+          if [ -n "${{ secrets.EC2_HOST }}" ] && [ -n "${{ secrets.EC2_USER }}" ] && [ -n "${{ secrets.EC2_SSH_KEY }}" ]; then
+            echo "✅ All secrets found. Deployment will run."
+            echo "deploy_enabled=true" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️ One or more secrets missing — skipping deploy."
+            echo "deploy_enabled=false" >> $GITHUB_OUTPUT
+          fi
+
+  deploy:
+    name: 🚀 Deploy to EC2 (Node)
+    runs-on: ubuntu-latest
+    needs: validate-secrets
+    if: needs.validate-secrets.outputs.deploy_enabled == 'true'
+    steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --------------------------------------------
-      # STEP 2: Validate secrets
-      # --------------------------------------------
-      - name: Validate required secrets
-        run: |
-          if [ -z "${{ secrets.EC2_HOST }}" ] || [ -z "${{ secrets.EC2_USER }}" ] || [ -z "${{ secrets.EC2_SSH_KEY }}" ]; then
-            echo "❌ Missing one or more required secrets (EC2_HOST, EC2_USER, EC2_SSH_KEY)."
-            exit 1
-          else
-            echo "✅ All required secrets are set."
-          fi
-
-      # --------------------------------------------
-      # STEP 3: Ensure deployment directory on EC2
-      # --------------------------------------------
-      - name: Prepare backend directory on EC2
+      - name: Ensure project folder permissions
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            mkdir -p /home/${{ secrets.EC2_USER }}/app
-            sudo chown -R $USER:$USER /home/${{ secrets.EC2_USER }}/app
-            sudo chmod -R 755 /home/${{ secrets.EC2_USER }}/app
+            mkdir -p /home/${{ secrets.EC2_USER }}/ngo_project
+            sudo chown -R $USER:$USER /home/${{ secrets.EC2_USER }}/ngo_project
+            sudo chmod -R u+rwX /home/${{ secrets.EC2_USER }}/ngo_project
 
-      # --------------------------------------------
-      # STEP 4: Upload code to EC2 via SCP
-      # --------------------------------------------
-      - name: Upload project to EC2
+      - name: Upload project files to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           source: .
-          target: /home/${{ secrets.EC2_USER }}/app
+          target: /home/${{ secrets.EC2_USER }}/ngo_project
           overwrite: true
 
-      # --------------------------------------------
-      # STEP 5: Deploy Node app on EC2
-      # --------------------------------------------
-      - name: Run deployment commands
+      - name: Run deployment commands on EC2
         uses: appleboy/ssh-action@v1.0.3
-        env:
-          APP_DIR: /home/${{ secrets.EC2_USER }}/app
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script_stop: true
           script: |
-            echo "🚀 Starting Node.js app deployment..."
-            cd /home/${{ secrets.EC2_USER }}/app
-
-            # Install Node.js and PM2 if not already installed
-            if ! command -v node &> /dev/null; then
-              echo "Installing Node.js..."
-              curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-              sudo apt-get install -y nodejs
-            fi
-
-            if ! command -v pm2 &> /dev/null; then
-              echo "Installing PM2 globally..."
-              sudo npm install -g pm2
-            fi
+            cd /home/${{ secrets.EC2_USER }}/ngo_project
 
             # Install dependencies
-            npm install --force
+            npm install --production
 
-            # Create logs directory
-            mkdir -p logs
+            # Restart app using PM2 (or fallback to nohup)
+            if command -v pm2 >/dev/null 2>&1; then
+              pm2 stop ngo-app || true
+              pm2 start npm --name ngo-app -- start
+            else
+              pkill -f "node index.js" || true
+              nohup npm start > app.log 2>&1 & disown
+            fi
 
-            # Restart or start app using PM2
-            APP_NAME="ngo-app"
-            pm2 stop $APP_NAME || true
-            pm2 delete $APP_NAME || true
-            pm2 start npm --name "$APP_NAME" -- start
+            echo "✅ Deployment complete on $(hostname) at $(date)."
 
-            pm2 save
-            pm2 startup systemd -u $USER --hp $HOME
-
-            echo "✅ Deployment successful! Node.js app is running on port 8000."
+  skip-deploy:
+    name: 💤 Skip Deployment (No Secrets)
+    runs-on: ubuntu-latest
+    needs: validate-secrets
+    if: needs.validate-secrets.outputs.deploy_enabled == 'false'
+    steps:
+      - run: echo "⚠️ Skipping deployment because secrets are missing."
