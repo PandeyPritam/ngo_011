@@ -1,0 +1,114 @@
+name: CI / CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY: docker.io
+      FRONTEND_DIR: Frontend/Ngo_system_frontend
+      BACKEND_DIR: Backend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node (frontend)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Cache frontend node modules
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.FRONTEND_DIR }}/node_modules
+          key: frontend-${{ runner.os }}-${{ hashFiles(env.FRONTEND_DIR + '/package-lock.json', env.FRONTEND_DIR + '/package.json') }}
+          restore-keys: |
+            frontend-${{ runner.os }}-
+
+      - name: Install and build frontend
+        working-directory: ${{ env.FRONTEND_DIR }}
+        run: |
+          npm ci
+          npm run build
+
+      - name: Set up Node (backend)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Cache backend node modules
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.BACKEND_DIR }}/node_modules
+          key: backend-${{ runner.os }}-${{ hashFiles(env.BACKEND_DIR + '/package-lock.json', env.BACKEND_DIR + '/package.json') }}
+          restore-keys: |
+            backend-${{ runner.os }}-
+
+      - name: Install backend dependencies
+        working-directory: ${{ env.BACKEND_DIR }}
+        run: |
+          npm ci
+
+      - name: Run linter (frontend)
+        working-directory: ${{ env.FRONTEND_DIR }}
+        run: |
+          npm run lint || true
+
+      - name: Build and push Docker images
+        if: ${{ secrets.DOCKERHUB_USERNAME && secrets.DOCKERHUB_TOKEN }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            NODE_ENV=production
+          # build two images (backend and frontend) in one workflow; adjust tags as needed
+          tags: |
+            ${{ env.REGISTRY }}/${{ secrets.DOCKERHUB_USERNAME }}/ngo-backend:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ secrets.DOCKERHUB_USERNAME }}/ngo-frontend:${{ github.sha }}
+          file: |
+            Backend/Dockerfile
+            Frontend/Ngo_system_frontend/Dockerfile
+          # use multiple contexts mapping to the two Dockerfiles
+          build-opts: |
+            type=local,src=${{ env.BACKEND_DIR }}
+            type=local,src=${{ env.FRONTEND_DIR }}
+
+      - name: Print image info (no push)
+        if: ${{ !secrets.DOCKERHUB_USERNAME || !secrets.DOCKERHUB_TOKEN }}
+        run: |
+          echo "Docker Hub credentials not found. Skipping image push."
+          echo "You can build images locally with:"
+          echo "  docker build -t ngo-backend:local -f Backend/Dockerfile Backend"
+          echo "  docker build -t ngo-frontend:local -f Frontend/Ngo_system_frontend/Dockerfile Frontend/Ngo_system_frontend"
+
+  deploy-on-server:
+    needs: build-and-publish
+    runs-on: ubuntu-latest
+    if: ${{ secrets.DEPLOY_HOST && secrets.DEPLOY_USER && secrets.DEPLOY_KEY }}
+    steps:
+      - name: Deploy via SSH (pull images & restart)
+        uses: appleboy/ssh-action@v0.1.9
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          script: |
+            docker pull ${{ env.REGISTRY }}/${{ secrets.DOCKERHUB_USERNAME }}/ngo-backend:${{ github.sha }} || true
+            docker pull ${{ env.REGISTRY }}/${{ secrets.DOCKERHUB_USERNAME }}/ngo-frontend:${{ github.sha }} || true
+            # adjust docker-compose path on remote server
+            cd ~/ngos
+            docker compose pull || true
+            docker compose up -d --build
