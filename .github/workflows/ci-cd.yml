@@ -2,8 +2,7 @@ name: Deploy to EC2 (Node.js App)
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch: {}
 
 concurrency:
@@ -12,24 +11,26 @@ concurrency:
 
 jobs:
   validate-secrets:
-    name: ✅ Validate Secrets (Skip if Missing)
+    name: ✅ Validate Secrets
     runs-on: ubuntu-latest
     outputs:
       deploy_enabled: ${{ steps.check.outputs.deploy_enabled }}
     steps:
       - name: Check required secrets
         id: check
+        shell: bash
         run: |
-          if [ -n "${{ secrets.EC2_HOST }}" ] && [ -n "${{ secrets.EC2_USER }}" ] && [ -n "${{ secrets.EC2_SSH_KEY }}" ]; then
-            echo "✅ All secrets found. Deployment will run."
+          echo "Checking required secrets..."
+          if [[ -n "${{ secrets.EC2_HOST }}" && -n "${{ secrets.EC2_USER }}" && -n "${{ secrets.EC2_SSH_KEY }}" ]]; then
+            echo "✅ All secrets found."
             echo "deploy_enabled=true" >> $GITHUB_OUTPUT
           else
-            echo "⚠️ One or more secrets missing — skipping deploy."
+            echo "⚠️ Missing secrets, skipping deployment."
             echo "deploy_enabled=false" >> $GITHUB_OUTPUT
           fi
 
   deploy:
-    name: 🚀 Deploy to EC2 (Node)
+    name: 🚀 Deploy to EC2
     runs-on: ubuntu-latest
     needs: validate-secrets
     if: needs.validate-secrets.outputs.deploy_enabled == 'true'
@@ -37,18 +38,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Ensure project folder permissions
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            mkdir -p /home/${{ secrets.EC2_USER }}/ngo_project
-            sudo chown -R $USER:$USER /home/${{ secrets.EC2_USER }}/ngo_project
-            sudo chmod -R u+rwX /home/${{ secrets.EC2_USER }}/ngo_project
-
-      - name: Upload project files to EC2
+      - name: Upload project to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -58,7 +48,7 @@ jobs:
           target: /home/${{ secrets.EC2_USER }}/ngo_project
           overwrite: true
 
-      - name: Run deployment commands on EC2
+      - name: Run commands on EC2
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -67,11 +57,9 @@ jobs:
           script_stop: true
           script: |
             cd /home/${{ secrets.EC2_USER }}/ngo_project
-
-            # Install dependencies
+            echo "Installing dependencies..."
             npm install --production
-
-            # Restart app using PM2 (or fallback to nohup)
+            echo "Restarting Node.js app..."
             if command -v pm2 >/dev/null 2>&1; then
               pm2 stop ngo-app || true
               pm2 start npm --name ngo-app -- start
@@ -79,13 +67,12 @@ jobs:
               pkill -f "node index.js" || true
               nohup npm start > app.log 2>&1 & disown
             fi
-
-            echo "✅ Deployment complete on $(hostname) at $(date)."
+            echo "✅ Deployment successful on $(hostname) at $(date)."
 
   skip-deploy:
-    name: 💤 Skip Deployment (No Secrets)
+    name: 💤 Skip Deployment
     runs-on: ubuntu-latest
     needs: validate-secrets
     if: needs.validate-secrets.outputs.deploy_enabled == 'false'
     steps:
-      - run: echo "⚠️ Skipping deployment because secrets are missing."
+      - run: echo "⚠️ Skipping deploy because secrets are missing."
