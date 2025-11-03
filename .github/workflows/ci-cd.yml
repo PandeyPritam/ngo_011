@@ -10,6 +10,8 @@ env:
   FRONTEND_DIR: Frontend/Ngo_system_frontend
   BACKEND_DIR: Backend
   NODE_VERSION: '18'
+  # DEPLOY_ENABLED will be "true" only when all three secrets exist (non-empty).
+  DEPLOY_ENABLED: ${{ (secrets.DEPLOY_HOST && secrets.DEPLOY_USER && secrets.DEPLOY_KEY) && 'true' || 'false' }}
 
 jobs:
   build-frontend:
@@ -28,6 +30,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.FRONTEND_DIR }}/node_modules
+          # use a single file path inside hashFiles() for correctness
           key: frontend-${{ runner.os }}-v1-${{ hashFiles(format('{0}/package-lock.json', env.FRONTEND_DIR)) }}
           restore-keys: |
             frontend-${{ runner.os }}-v1-
@@ -93,7 +96,8 @@ jobs:
     name: Deploy to server (SSH)
     runs-on: ubuntu-latest
     needs: [build-frontend, build-backend]
-    if: ${{ secrets.DEPLOY_HOST && secrets.DEPLOY_USER && secrets.DEPLOY_KEY }}
+    # Only run deploy when DEPLOY_ENABLED == 'true' (i.e., secrets are present)
+    if: ${{ env.DEPLOY_ENABLED == 'true' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -143,7 +147,7 @@ jobs:
     name: Notify on failure
     runs-on: ubuntu-latest
     needs: [build-frontend, build-backend]
-    if: failure()
+    if: ${{ failure() }}
     steps:
       - name: Print failure message
         run: echo "CI pipeline failed for ${{ github.ref }} (commit: ${{ github.sha }})"
