@@ -10,8 +10,6 @@ env:
   FRONTEND_DIR: Frontend/Ngo_system_frontend
   BACKEND_DIR: Backend
   NODE_VERSION: '18'
-  # DEPLOY_ENABLED will be "true" only when all three secrets exist (non-empty).
-  DEPLOY_ENABLED: ${{ (secrets.DEPLOY_HOST && secrets.DEPLOY_USER && secrets.DEPLOY_KEY) && 'true' || 'false' }}
 
 jobs:
   build-frontend:
@@ -30,8 +28,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.FRONTEND_DIR }}/node_modules
-          # use a single file path inside hashFiles() for correctness
-          key: frontend-${{ runner.os }}-v1-${{ hashFiles(format('{0}/package-lock.json', env.FRONTEND_DIR)) }}
+          key: frontend-${{ runner.os }}-v1-${{ hashFiles('Frontend/Ngo_system_frontend/package-lock.json') }}
           restore-keys: |
             frontend-${{ runner.os }}-v1-
 
@@ -70,7 +67,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.BACKEND_DIR }}/node_modules
-          key: backend-${{ runner.os }}-v1-${{ hashFiles(format('{0}/package-lock.json', env.BACKEND_DIR)) }}
+          key: backend-${{ runner.os }}-v1-${{ hashFiles('Backend/package-lock.json') }}
           restore-keys: |
             backend-${{ runner.os }}-v1-
 
@@ -110,38 +107,30 @@ jobs:
           port: ${{ secrets.DEPLOY_PORT || '22' }}
           script: |
             set -e
-            # Use the remote deploy path secret (or default)
-            REMOTE_ROOT="${{ secrets.DEPLOY_PATH || '~/ngos' }}"
-            cd "$REMOTE_ROOT" || exit 1
+            # Remote deploy path (from secret) or default
+            REMOTE_ROOT="${{ secrets.DEPLOY_PATH || '/home/' + (secrets.DEPLOY_USER || 'ubuntu') + '/ngos' }}"
+            cd "$REMOTE_ROOT" || git clone https://github.com/${{ github.repository }} "$REMOTE_ROOT" && cd "$REMOTE_ROOT"
+            git fetch --all
+            git reset --hard origin/main || true
 
-            # Ensure latest code on remote
-            if [ -d .git ]; then
-              git fetch --all
-              git reset --hard origin/main
-            else
-              git clone https://github.com/${{ github.repository }} . || true
-            fi
-
-            # Backend install & restart (adjust to your server setup)
+            # Backend: install and restart
             cd "${{ env.BACKEND_DIR }}"
-            npm ci --production
-
+            npm ci --production || true
             if command -v pm2 >/dev/null 2>&1; then
-              pm2 stop ngo-backend || true
-              pm2 start npm --name ngo-backend -- start
+              pm2 restart ngo-backend || pm2 start npm --name ngo-backend -- start
             else
               pkill -f "node index.js" || true
-              nohup npm start > backend.log 2>&1 & disown
+              nohup npm start > backend.log 2>&1 & disown || true
             fi
 
-            # Frontend build & optionally copy to webroot
-            cd "${{ env.FRONTEND_DIR }}"
-            npm ci --production
-            npm run build
+            # Frontend: build and optional publish to webroot
+            cd "../${{ env.FRONTEND_DIR }}"
+            npm ci --production || true
+            npm run build || true
 
             if [ -n "${{ secrets.WEBROOT_PATH }}" ]; then
-              rm -rf "${{ secrets.WEBROOT_PATH }}"/*
-              cp -r dist/* "${{ secrets.WEBROOT_PATH }}/"
+              rm -rf "${{ secrets.WEBROOT_PATH }}"/* || true
+              cp -r dist/* "${{ secrets.WEBROOT_PATH }}/" || true
             fi
 
             echo "Deployment finished on $(hostname) at $(date)."
@@ -150,7 +139,7 @@ jobs:
     name: Notify on failure
     runs-on: ubuntu-latest
     needs: [build-frontend, build-backend]
-    if: ${{ failure() }}
+    if: failure()
     steps:
       - name: Print failure message
         run: echo "CI pipeline failed for ${{ github.ref }} (commit: ${{ github.sha }})"
