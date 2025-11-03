@@ -1,4 +1,4 @@
-name: Deploy to EC2 (Node.js App)
+name: 🚀 Deploy Node.js App to EC2
 
 on:
   push:
@@ -20,13 +20,18 @@ jobs:
         id: check
         shell: bash
         run: |
-          echo "Checking required secrets..."
-          if [[ -n "${{ secrets.EC2_HOST }}" && -n "${{ secrets.EC2_USER }}" && -n "${{ secrets.EC2_SSH_KEY }}" ]]; then
-            echo "✅ All secrets found."
-            echo "deploy_enabled=true" >> $GITHUB_OUTPUT
-          else
-            echo "⚠️ Missing secrets, skipping deployment."
+          echo "🔍 Checking required secrets..."
+          missing=false
+          [[ -z "${{ secrets.EC2_HOST }}" ]] && echo "❌ Missing EC2_HOST" && missing=true
+          [[ -z "${{ secrets.EC2_USER }}" ]] && echo "❌ Missing EC2_USER" && missing=true
+          [[ -z "${{ secrets.EC2_SSH_KEY }}" ]] && echo "❌ Missing EC2_SSH_KEY" && missing=true
+
+          if [ "$missing" = true ]; then
+            echo "⚠️ One or more secrets are missing. Skipping deployment."
             echo "deploy_enabled=false" >> $GITHUB_OUTPUT
+          else
+            echo "✅ All required secrets are present."
+            echo "deploy_enabled=true" >> $GITHUB_OUTPUT
           fi
 
   deploy:
@@ -56,18 +61,28 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script_stop: true
           script: |
-            cd /home/${{ secrets.EC2_USER }}/ngo_project
-            echo "Installing dependencies..."
+            echo "📦 Starting deployment on $(hostname)..."
+            cd /home/${{ secrets.EC2_USER }}/ngo_project || mkdir -p /home/${{ secrets.EC2_USER }}/ngo_project && cd /home/${{ secrets.EC2_USER }}/ngo_project
+
+            echo "🧹 Cleaning old dependencies..."
+            rm -rf node_modules
+
+            echo "📦 Installing dependencies..."
             npm install --production
-            echo "Restarting Node.js app..."
+
+            echo "🚀 Starting Node.js app..."
             if command -v pm2 >/dev/null 2>&1; then
+              echo "🔁 Restarting app using PM2..."
               pm2 stop ngo-app || true
               pm2 start npm --name ngo-app -- start
+              pm2 save
             else
+              echo "🪄 PM2 not found. Running with nohup..."
               pkill -f "node index.js" || true
               nohup npm start > app.log 2>&1 & disown
             fi
-            echo "✅ Deployment successful on $(hostname) at $(date)."
+
+            echo "✅ Deployment complete on $(hostname) at $(date)"
 
   skip-deploy:
     name: 💤 Skip Deployment
@@ -75,4 +90,4 @@ jobs:
     needs: validate-secrets
     if: needs.validate-secrets.outputs.deploy_enabled == 'false'
     steps:
-      - run: echo "⚠️ Skipping deploy because secrets are missing."
+      - run: echo "⚠️ Skipping deploy because one or more secrets are missing."
